@@ -82,6 +82,90 @@ end
 local zone
 local delieveryZone
 
+-- Non-target (distance) mode: ox_lib sphere zones replace the per-frame
+-- distance-polling threads. Each mission leg gets a marker zone (r=20, draws
+-- the marker via the zone's per-tick `inside`) and a prompt zone (r=5, draws
+-- the 3D prompt and handles the key press). Zones are destroyed and recreated
+-- whenever the leg changes (pickup -> delivery), so they always track
+-- NpcData.CurrentNpc / NpcData.CurrentDeliver.
+local pickupMarkerZone, pickupPromptZone = nil, nil
+local deliverMarkerZone, deliverPromptZone = nil, nil
+
+local function removePickupZonesNT()
+    if pickupMarkerZone then pickupMarkerZone:remove() pickupMarkerZone = nil end
+    if pickupPromptZone then pickupPromptZone:remove() pickupPromptZone = nil end
+end
+
+local function removeDeliverZonesNT()
+    if deliverMarkerZone then deliverMarkerZone:remove() deliverMarkerZone = nil end
+    if deliverPromptZone then deliverPromptZone:remove() deliverPromptZone = nil end
+end
+
+local function npcDropoffKeyCheckNT()
+    if not (NpcData.Active and NpcData.NpcTaken and NpcData.Npc) then return end
+    if not isInsideDropZone then return end
+    if IsControlJustPressed(0, 38) then
+        TaskLeaveVehicle(NpcData.Npc, cache.vehicle, 0)
+        SetEntityAsMissionEntity(NpcData.Npc, false, true)
+        SetEntityAsNoLongerNeeded(NpcData.Npc)
+        local targetCoords = sharedConfig.npcLocations.takeLocations[NpcData.LastNpc]
+        TaskGoStraightToCoord(NpcData.Npc, targetCoords.x, targetCoords.y, targetCoords.z, 1.0, -1, 0.0, 0.0)
+        SendNUIMessage({
+            action = 'toggleMeter'
+        })
+        TriggerServerEvent('qb-taxi:server:NpcPay', meterData.currentFare)
+        meterActive = false
+        SendNUIMessage({
+            action = 'resetMeter'
+        })
+
+        pickupLocation, dropOffLocation = nil, nil
+
+        exports.aicore:Notify(locale('info.person_was_dropped_off'), 'success')
+        if NpcData.DeliveryBlip then
+            RemoveBlip(NpcData.DeliveryBlip)
+        end
+        local RemovePed = function(p)
+            SetTimeout(60000, function()
+                DeletePed(p)
+            end)
+        end
+        RemovePed(NpcData.Npc)
+        resetNpcTask()
+        -- Defer removal: never mutate the zone list from inside its own tick callback
+        SetTimeout(0, removeDeliverZonesNT)
+    end
+end
+
+local function createDeliverZonesNT()
+    removeDeliverZonesNT()
+    local deliver = sharedConfig.npcLocations.deliverLocations[NpcData.CurrentDeliver]
+    local dCoord = deliver.xyz
+    deliverMarkerZone = lib.zones.sphere({
+        coords = dCoord,
+        radius = 20.0,
+        debug = config.debugPoly,
+        inside = function()
+            DrawMarker(2, deliver.x, deliver.y, deliver.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 255, 255, 255, 255, false, false, 0, true, nil, nil, false)
+        end
+    })
+    deliverPromptZone = lib.zones.sphere({
+        coords = dCoord,
+        radius = 5.0,
+        debug = config.debugPoly,
+        onEnter = function()
+            isInsideDropZone = true
+        end,
+        onExit = function()
+            isInsideDropZone = false
+        end,
+        inside = function()
+            aicore.drawText3d({text = locale('info.drop_off_npc'), coords = dCoord})
+            npcDropoffKeyCheckNT()
+        end
+    })
+end
+
 local function getDeliveryLocation()
     NpcData.CurrentDeliver = math.random(1, #sharedConfig.npcLocations.deliverLocations)
     if NpcData.LastDeliver then
@@ -98,106 +182,133 @@ local function getDeliveryLocation()
     SetBlipRoute(NpcData.DeliveryBlip, true)
     SetBlipRouteColour(NpcData.DeliveryBlip, 3)
     NpcData.LastDeliver = NpcData.CurrentDeliver
-    if not config.useTarget then -- added checks to disable distance checking if polyzone option is used
-        CreateThread(function()
-            while true do
-                local pos = GetEntityCoords(cache.ped)
-                local dist = #(pos - vec3(sharedConfig.npcLocations.deliverLocations[NpcData.CurrentDeliver].x, sharedConfig.npcLocations.deliverLocations[NpcData.CurrentDeliver].y, sharedConfig.npcLocations.deliverLocations[NpcData.CurrentDeliver].z))
-                if dist < 20 then
-                    DrawMarker(2, sharedConfig.npcLocations.deliverLocations[NpcData.CurrentDeliver].x, sharedConfig.npcLocations.deliverLocations[NpcData.CurrentDeliver].y, sharedConfig.npcLocations.deliverLocations[NpcData.CurrentDeliver].z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 255, 255, 255, 255, false, false, 0, true, nil, nil, false)
-                    if dist < 5 then
-                        aicore.drawText3d({text = locale('info.drop_off_npc'), coords = sharedConfig.npcLocations.deliverLocations[NpcData.CurrentDeliver].xyz})
-                        if IsControlJustPressed(0, 38) then
-                            TaskLeaveVehicle(NpcData.Npc, cache.vehicle, 0)
-                            SetEntityAsMissionEntity(NpcData.Npc, false, true)
-                            SetEntityAsNoLongerNeeded(NpcData.Npc)
-                            local targetCoords = sharedConfig.npcLocations.takeLocations[NpcData.LastNpc]
-                            TaskGoStraightToCoord(NpcData.Npc, targetCoords.x, targetCoords.y, targetCoords.z, 1.0, -1, 0.0, 0.0)
-                            SendNUIMessage({
-                                action = 'toggleMeter'
-                            })
-                            TriggerServerEvent('qb-taxi:server:NpcPay', meterData.currentFare)
-                            meterActive = false
-                            SendNUIMessage({
-                                action = 'resetMeter'
-                            })
-
-                            pickupLocation, dropOffLocation = nil, nil
-
-                            exports.aicore:Notify(locale('info.person_was_dropped_off'), 'success')
-                            if NpcData.DeliveryBlip then
-                                RemoveBlip(NpcData.DeliveryBlip)
-                            end
-                            local RemovePed = function(p)
-                                SetTimeout(60000, function()
-                                    DeletePed(p)
-                                end)
-                            end
-                            RemovePed(NpcData.Npc)
-                            resetNpcTask()
-                            break
-                        end
-                    end
-                end
-                Wait(0)
-            end
-        end)
+    if not config.useTarget then -- distance polling replaced by ox_lib sphere zones
+        createDeliverZonesNT()
     end
 end
 
-local function callNpcPoly()
-    CreateThread(function()
-        while not NpcData.NpcTaken do
-            if isInsidePickupZone then
-                if IsControlJustPressed(0, 38) then
-                    lib.hideTextUI()
-                    local veh = cache.vehicle
-                    local maxSeats, freeSeat = GetVehicleMaxNumberOfPassengers(veh), 0
+local function npcPickupKeyCheckNT()
+    if not (NpcData.Active and not NpcData.NpcTaken and NpcData.Npc) then return end
+    if not isInsidePickupZone then return end
+    if IsControlJustPressed(0, 38) then
+        local maxSeats, freeSeat = GetVehicleMaxNumberOfPassengers(cache.vehicle), 0
 
-                    for i= maxSeats - 1, 0, -1 do
-                        if IsVehicleSeatFree(veh, i) then
-                            freeSeat = i
-                            break
-                        end
-                    end
-
-                    meterIsOpen = true
-                    meterActive = true
-
-                    lastLocation = GetEntityCoords(cache.ped)
-                    SendNUIMessage({
-                        action = 'openMeter',
-                        toggle = true,
-                        meterData = config.meter
-                    })
-                    SendNUIMessage({
-                        action = 'toggleMeter'
-                    })
-                    pickupLocation = GetEntityCoords(cache.ped)
-                    ClearPedTasksImmediately(NpcData.Npc)
-                    FreezeEntityPosition(NpcData.Npc, false)
-                    TaskEnterVehicle(NpcData.Npc, veh, -1, freeSeat, 1.0, 0)
-                    exports.aicore:Notify(locale('info.go_to_location'), 'inform')
-                    if NpcData.NpcBlip then
-                        RemoveBlip(NpcData.NpcBlip)
-                    end
-                    getDeliveryLocation()
-                    NpcData.NpcTaken = true
-                    createNpcDelieveryLocation()
-                    zone:remove()
-                    lib.hideTextUI()
-                end
+        for i=maxSeats - 1, 0, -1 do
+            if IsVehicleSeatFree(cache.vehicle, i) then
+                freeSeat = i
+                break
             end
-            Wait(0)
         end
-    end)
+
+        pickupLocation = GetEntityCoords(cache.ped)
+
+        meterIsOpen = true
+        meterActive = true
+        lastLocation = GetEntityCoords(cache.ped)
+        SendNUIMessage({
+            action = 'openMeter',
+            toggle = true,
+            meterData = config.meter
+        })
+        SendNUIMessage({
+            action = 'toggleMeter'
+        })
+        ClearPedTasksImmediately(NpcData.Npc)
+        FreezeEntityPosition(NpcData.Npc, false)
+        TaskEnterVehicle(NpcData.Npc, cache.vehicle, -1, freeSeat, 1.0, 0)
+        exports.aicore:Notify(locale('info.go_to_location'), 'inform')
+        if NpcData.NpcBlip ~= nil then
+            RemoveBlip(NpcData.NpcBlip)
+        end
+        getDeliveryLocation()
+        dropOffLocation = config.pzLocations.dropLocations[NpcData.CurrentDeliver].coord.xyz
+        NpcData.NpcTaken = true
+        -- Defer removal: never mutate the zone list from inside its own tick callback
+        SetTimeout(0, removePickupZonesNT)
+    end
+end
+
+local function createPickupZonesNT()
+    removePickupZonesNT()
+    local take = sharedConfig.npcLocations.takeLocations[NpcData.CurrentNpc]
+    local tCoord = take.xyz
+    pickupMarkerZone = lib.zones.sphere({
+        coords = tCoord,
+        radius = 20.0,
+        debug = config.debugPoly,
+        inside = function()
+            DrawMarker(2, take.x, take.y, take.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 255, 255, 255, 255, false, false, 0, true, nil, nil, false)
+        end
+    })
+    pickupPromptZone = lib.zones.sphere({
+        coords = tCoord,
+        radius = 5.0,
+        debug = config.debugPoly,
+        onEnter = function()
+            isInsidePickupZone = true
+        end,
+        onExit = function()
+            isInsidePickupZone = false
+        end,
+        inside = function()
+            aicore.drawText3d({text = locale('info.call_npc'), coords = tCoord})
+            npcPickupKeyCheckNT()
+        end
+    })
+end
+
+-- useTarget mode: pickup key-press runs on the pickup box zone's per-tick
+-- `inside` callback instead of a dedicated Wait(0) polling thread.
+local function pickupInsideTarget()
+    if NpcData.NpcTaken then return end
+    if not whitelistedVehicle() then return end -- parity with onEnterCallZone gate
+    if IsControlJustPressed(0, 38) then
+        lib.hideTextUI()
+        local veh = cache.vehicle
+        local maxSeats, freeSeat = GetVehicleMaxNumberOfPassengers(veh), 0
+
+        for i= maxSeats - 1, 0, -1 do
+            if IsVehicleSeatFree(veh, i) then
+                freeSeat = i
+                break
+            end
+        end
+
+        meterIsOpen = true
+        meterActive = true
+
+        lastLocation = GetEntityCoords(cache.ped)
+        SendNUIMessage({
+            action = 'openMeter',
+            toggle = true,
+            meterData = config.meter
+        })
+        SendNUIMessage({
+            action = 'toggleMeter'
+        })
+        pickupLocation = GetEntityCoords(cache.ped)
+        ClearPedTasksImmediately(NpcData.Npc)
+        FreezeEntityPosition(NpcData.Npc, false)
+        TaskEnterVehicle(NpcData.Npc, veh, -1, freeSeat, 1.0, 0)
+        exports.aicore:Notify(locale('info.go_to_location'), 'inform')
+        if NpcData.NpcBlip then
+            RemoveBlip(NpcData.NpcBlip)
+        end
+        getDeliveryLocation()
+        NpcData.NpcTaken = true
+        createNpcDelieveryLocation()
+        lib.hideTextUI()
+        -- Defer removal: never mutate the zone list from inside its own tick callback
+        SetTimeout(0, function()
+            if zone then zone:remove() zone = nil end
+        end)
+    end
 end
 
 local function onEnterCallZone()
     if whitelistedVehicle() and not isInsidePickupZone and not NpcData.NpcTaken then
         isInsidePickupZone = true
         lib.showTextUI(locale('info.call_npc'), {position = 'left-center'})
-        callNpcPoly()
     end
 end
 
@@ -213,7 +324,8 @@ local function createNpcPickUpLocation()
         rotation = config.pzLocations.takeLocations[NpcData.CurrentNpc].heading,
         debug = config.debugPoly,
         onEnter = onEnterCallZone,
-        onExit = onExitCallZone
+        onExit = onExitCallZone,
+        inside = pickupInsideTarget
     })
 end
 
@@ -289,7 +401,6 @@ local function onEnterDropZone()
     if whitelistedVehicle() and not isInsideDropZone and NpcData.NpcTaken then
         isInsideDropZone = true
         lib.showTextUI(locale('info.drop_off_npc'), {position = 'left-center'})
-        dropNpcPoly()
     end
 end
 
@@ -299,6 +410,49 @@ local function onExitDropZone()
 
 end
 
+-- useTarget mode: dropoff key-press runs on the delivery box zone's per-tick
+-- `inside` callback instead of a dedicated Wait(0) polling thread. The teardown
+-- (with its Wait(1000)) runs in a one-shot thread so the zone tick is never blocked.
+local function dropoffInsideTarget()
+    if not (NpcData.NpcTaken and NpcData.Npc) then return end
+    if not whitelistedVehicle() then return end -- parity with onEnterDropZone gate
+    if IsControlJustPressed(0, 38) then
+        NpcData.NpcTaken = false -- single-shot; teardown below runs async
+        CreateThread(function()
+            lib.hideTextUI()
+            local veh = cache.vehicle
+            TaskLeaveVehicle(NpcData.Npc, veh, 0)
+            Wait(1000)
+            SetVehicleDoorShut(veh, 3, false)
+            SetEntityAsMissionEntity(NpcData.Npc, false, true)
+            SetEntityAsNoLongerNeeded(NpcData.Npc)
+            local targetCoords = sharedConfig.npcLocations.takeLocations[NpcData.LastNpc]
+            TaskGoStraightToCoord(NpcData.Npc, targetCoords.x, targetCoords.y, targetCoords.z, 1.0, -1, 0.0, 0.0)
+            SendNUIMessage({
+                action = 'toggleMeter'
+            })
+            TriggerServerEvent('qb-taxi:server:NpcPay', meterData.currentFare)
+            meterActive = false
+            SendNUIMessage({
+                action = 'resetMeter'
+            })
+            exports.aicore:Notify(locale('info.person_was_dropped_off'), 'success')
+            if NpcData.DeliveryBlip ~= nil then
+                RemoveBlip(NpcData.DeliveryBlip)
+            end
+            local RemovePed = function(p)
+                SetTimeout(60000, function()
+                    DeletePed(p)
+                end)
+            end
+            RemovePed(NpcData.Npc)
+            resetNpcTask()
+            if delieveryZone then delieveryZone:remove() delieveryZone = nil end
+            lib.hideTextUI()
+        end)
+    end
+end
+
 function createNpcDelieveryLocation()
     delieveryZone = lib.zones.box({
         coords = config.pzLocations.dropLocations[NpcData.CurrentDeliver].coord,
@@ -306,51 +460,9 @@ function createNpcDelieveryLocation()
         rotation = config.pzLocations.dropLocations[NpcData.CurrentDeliver].heading,
         debug = config.debugPoly,
         onEnter = onEnterDropZone,
-        onExit = onExitDropZone
+        onExit = onExitDropZone,
+        inside = dropoffInsideTarget
     })
-end
-
-function dropNpcPoly()
-    CreateThread(function()
-        while NpcData.NpcTaken do
-            if isInsideDropZone then
-                if IsControlJustPressed(0, 38) then
-                    lib.hideTextUI()
-                    local veh = cache.vehicle
-                    TaskLeaveVehicle(NpcData.Npc, veh, 0)
-                    Wait(1000)
-                    SetVehicleDoorShut(veh, 3, false)
-                    SetEntityAsMissionEntity(NpcData.Npc, false, true)
-                    SetEntityAsNoLongerNeeded(NpcData.Npc)
-                    local targetCoords = sharedConfig.npcLocations.takeLocations[NpcData.LastNpc]
-                    TaskGoStraightToCoord(NpcData.Npc, targetCoords.x, targetCoords.y, targetCoords.z, 1.0, -1, 0.0, 0.0)
-                    SendNUIMessage({
-                        action = 'toggleMeter'
-                    })
-                    TriggerServerEvent('qb-taxi:server:NpcPay', meterData.currentFare)
-                    meterActive = false
-                    SendNUIMessage({
-                        action = 'resetMeter'
-                    })
-                    exports.aicore:Notify(locale('info.person_was_dropped_off'), 'success')
-                    if NpcData.DeliveryBlip ~= nil then
-                        RemoveBlip(NpcData.DeliveryBlip)
-                    end
-                    local RemovePed = function(p)
-                        SetTimeout(60000, function()
-                            DeletePed(p)
-                        end)
-                    end
-                    RemovePed(NpcData.Npc)
-                    resetNpcTask()
-                    delieveryZone:remove()
-                    lib.hideTextUI()
-                    break
-                end
-            end
-            Wait(0)
-        end
-    end)
 end
 
 local function setLocationsBlip()
@@ -537,59 +649,9 @@ RegisterNetEvent('qb-taxi:client:DoTaxiNpc', function()
             NpcData.LastNpc = NpcData.CurrentNpc
             NpcData.Active = true
 
-            -- added checks to disable distance checking if polyzone option is used
+            -- distance polling replaced by ox_lib sphere zones (see createPickupZonesNT)
             if not config.useTarget then
-                CreateThread(function()
-                    while not NpcData.NpcTaken do
-
-                        local pos = GetEntityCoords(cache.ped)
-                        local dist = #(pos - vec3(sharedConfig.npcLocations.takeLocations[NpcData.CurrentNpc].x, sharedConfig.npcLocations.takeLocations[NpcData.CurrentNpc].y, sharedConfig.npcLocations.takeLocations[NpcData.CurrentNpc].z))
-
-                        if dist < 20 then
-                            DrawMarker(2, sharedConfig.npcLocations.takeLocations[NpcData.CurrentNpc].x, sharedConfig.npcLocations.takeLocations[NpcData.CurrentNpc].y, sharedConfig.npcLocations.takeLocations[NpcData.CurrentNpc].z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 255, 255, 255, 255, false, false, 0, true, nil, nil, false)
-
-                            if dist < 5 then
-                                aicore.drawText3d({text = locale('info.call_npc'), coords = sharedConfig.npcLocations.takeLocations[NpcData.CurrentNpc].xyz})
-                                if IsControlJustPressed(0, 38) then
-                                    local maxSeats, freeSeat = GetVehicleMaxNumberOfPassengers(cache.vehicle), 0
-
-                                    for i=maxSeats - 1, 0, -1 do
-                                        if IsVehicleSeatFree(cache.vehicle, i) then
-                                            freeSeat = i
-                                            break
-                                        end
-                                    end
-
-                                    pickupLocation = GetEntityCoords(cache.ped)
-
-                                    meterIsOpen = true
-                                    meterActive = true
-                                    lastLocation = GetEntityCoords(cache.ped)
-                                    SendNUIMessage({
-                                        action = 'openMeter',
-                                        toggle = true,
-                                        meterData = config.meter
-                                    })
-                                    SendNUIMessage({
-                                        action = 'toggleMeter'
-                                    })
-                                    ClearPedTasksImmediately(NpcData.Npc)
-                                    FreezeEntityPosition(NpcData.Npc, false)
-                                    TaskEnterVehicle(NpcData.Npc, cache.vehicle, -1, freeSeat, 1.0, 0)
-                                    exports.aicore:Notify(locale('info.go_to_location'), 'inform')
-                                    if NpcData.NpcBlip ~= nil then
-                                        RemoveBlip(NpcData.NpcBlip)
-                                    end
-                                    getDeliveryLocation()
-                                    dropOffLocation = config.pzLocations.dropLocations[NpcData.CurrentDeliver].coord.xyz
-                                    NpcData.NpcTaken = true
-                                end
-                            end
-                        end
-
-                        Wait(0)
-                    end
-                end)
+                createPickupZonesNT()
             end
         else
             exports.aicore:Notify(locale('error.already_mission'), 'error')
