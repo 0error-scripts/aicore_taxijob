@@ -1,0 +1,9 @@
+name: Discord Commit
+
+on:
+  push:
+
+jobs:
+  notify:
+    uses: 0error-scripts/.github/.github/workflows/discord-commit.yml@main
+    secrets: inherit
