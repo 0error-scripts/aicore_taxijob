@@ -1,4 +1,4 @@
-lib.versionCheck('0error-scripts/aicore_taxijob')
+lib.versionCheck('aicore-fivem/aicore_taxijob')
 
 local config = require 'config.server'
 local sharedConfig = require 'config.shared'
