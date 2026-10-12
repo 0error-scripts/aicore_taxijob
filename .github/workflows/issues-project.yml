@@ -18,5 +18,5 @@ jobs:
           private-key: ${{ secrets.PRIVATE_KEY }}
       - uses: actions/add-to-project@v0.5.0
         with:
-          project-url: https://github.com/orgs/0error-scripts/projects/4
+          project-url: https://github.com/orgs/aicore-fivem/projects/4
           github-token: ${{ steps.generate_token.outputs.token }}

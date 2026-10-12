@@ -5,5 +5,5 @@ on:
 
 jobs:
   notify:
-    uses: 0error-scripts/.github/.github/workflows/discord-commit.yml@main
+    uses: aicore-fivem/.github/.github/workflows/discord-commit.yml@main
     secrets: inherit
